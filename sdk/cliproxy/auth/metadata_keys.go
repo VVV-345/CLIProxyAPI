@@ -14,6 +14,10 @@ func CanonicalCredentialMetadataKey(key string) string {
 		return "excluded_models"
 	case "fingerprint-profile":
 		return "fingerprint_profile"
+	case "codex-fingerprint-mode":
+		return "codex_fingerprint_mode"
+	case "codex-fingerprint-seed":
+		return "codex_fingerprint_seed"
 	case "model-aliases":
 		return "model_aliases"
 	case "proxy-url":

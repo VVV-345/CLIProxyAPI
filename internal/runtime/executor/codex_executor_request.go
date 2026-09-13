@@ -85,11 +85,14 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 type codexIdentityConfuseState struct {
-	enabled                bool
-	authID                 string
-	originalPromptCacheKey string
-	promptCacheKey         string
-	turnIDs                []codexIdentityReplacement
+	enabled                 bool
+	authID                  string
+	originalPromptCacheKey  string
+	promptCacheKey          string
+	turnIDs                 []codexIdentityReplacement
+	fingerprintMode         codexFingerprintMode
+	fingerprintSeed         string
+	fingerprintReplacements []codexFingerprintReplacement
 }
 
 type codexIdentityReplacement struct {
@@ -143,8 +146,14 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
 	var identityState codexIdentityConfuseState
 	rawJSON, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, rawJSON)
+	rawJSON, identityState = applyCodexFingerprintBody(auth, userPayload, rawJSON, identityState)
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
+	}
+	if identityState.fingerprintMode == codexFingerprintModeFull {
+		if promptCacheKey := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String()); promptCacheKey != "" {
+			cache.ID = promptCacheKey
+		}
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
@@ -186,24 +195,24 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 	if headers == nil {
 		return
 	}
-	if state == nil || !state.enabled {
+	if state == nil {
 		return
 	}
-
-	if rawTurnMetadata := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); rawTurnMetadata != "" {
-		headers.Set("X-Codex-Turn-Metadata", applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata, state))
+	if state.enabled {
+		if rawTurnMetadata := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); rawTurnMetadata != "" {
+			headers.Set("X-Codex-Turn-Metadata", applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata, state))
+		}
+		if state.promptCacheKey != "" {
+			setCodexSessionHeaderCasePreserved(headers, "Session-Id", state.promptCacheKey)
+			if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
+				setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)
+			}
+			headers.Set("X-Client-Request-Id", state.promptCacheKey)
+			headers.Set("Thread-Id", state.promptCacheKey)
+			headers.Set("X-Codex-Window-Id", state.promptCacheKey+":0")
+		}
 	}
-	if state.promptCacheKey == "" {
-		return
-	}
-
-	setCodexSessionHeaderCasePreserved(headers, "Session-Id", state.promptCacheKey)
-	if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
-		setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)
-	}
-	headers.Set("X-Client-Request-Id", state.promptCacheKey)
-	headers.Set("Thread-Id", state.promptCacheKey)
-	headers.Set("X-Codex-Window-Id", state.promptCacheKey+":0")
+	applyCodexFingerprintHeaders(headers, state)
 }
 
 func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexIdentityConfuseState) string {
@@ -226,6 +235,7 @@ func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexI
 }
 
 func applyCodexIdentityConfuseResponsePayload(payload []byte, state codexIdentityConfuseState) []byte {
+	payload = applyCodexFingerprintResponsePayload(payload, state, false)
 	payload = replaceCodexIdentityResponsePayload(payload, state.originalPromptCacheKey, state.promptCacheKey)
 	for _, turnID := range state.turnIDs {
 		payload = replaceCodexIdentityResponsePayload(payload, turnID.original, turnID.confused)
@@ -234,6 +244,7 @@ func applyCodexIdentityConfuseResponsePayload(payload []byte, state codexIdentit
 }
 
 func applyCodexIdentityExposeResponsePayload(payload []byte, state codexIdentityConfuseState) []byte {
+	payload = applyCodexFingerprintResponsePayload(payload, state, true)
 	payload = replaceCodexIdentityResponsePayload(payload, state.promptCacheKey, state.originalPromptCacheKey)
 	for _, turnID := range state.turnIDs {
 		payload = replaceCodexIdentityResponsePayload(payload, turnID.confused, turnID.original)
@@ -337,6 +348,16 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	misc.EnsureHeader(r.Header, ginHeaders, "Thread-Id", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "Session-Id", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Openai-Internal-Codex-Responses-Lite", "")
+	fingerprintMode, _ := codexFingerprintPolicy(auth)
+	if fingerprintMode >= codexFingerprintModeDevice {
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Installation-Id", "")
+	}
+	if fingerprintMode >= codexFingerprintModeSession {
+		misc.EnsureHeader(r.Header, ginHeaders, "Conversation_id", "")
+	}
+	if fingerprintMode >= codexFingerprintModeFull {
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Parent-Thread-Id", "")
+	}
 
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)

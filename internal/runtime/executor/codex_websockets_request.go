@@ -89,6 +89,18 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
 	misc.EnsureHeader(headers, ginHeaders, "Version", "")
+	fingerprintMode, _ := codexFingerprintPolicy(auth)
+	if fingerprintMode >= codexFingerprintModeDevice {
+		misc.EnsureHeader(headers, ginHeaders, "x-codex-installation-id", "")
+	}
+	if fingerprintMode >= codexFingerprintModeSession {
+		misc.EnsureHeader(headers, ginHeaders, "conversation_id", "")
+	}
+	if fingerprintMode >= codexFingerprintModeFull {
+		misc.EnsureHeader(headers, ginHeaders, "x-codex-window-id", "")
+		misc.EnsureHeader(headers, ginHeaders, "x-codex-parent-thread-id", "")
+		misc.EnsureHeader(headers, ginHeaders, "thread-id", "")
+	}
 	if isAPIKey {
 		ensureHeaderWithPriority(headers, ginHeaders, "User-Agent", "", "")
 	} else {
