@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "state": "idle",
+  "action": "none",
+  "request_id": null,
+  "target_tag": null,
+  "base_sha": "e851070a0d08fb631d5ee7c64ecfab9a30ecbd2a",
+  "candidate_sha": null,
+  "conflict_files": [],
+  "failed_steps": [],
+  "message": "No upstream compatibility run has been started.",
+  "workflow_url": null,
+  "updated_at": null
+}

@@ -5,6 +5,11 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
 
+## Upstream Sync
+- Read `CODEX_UPSTREAM_SYNC.md` before reviewing, repairing, or promoting an upstream synchronization
+- Reuse the fixed `codex/upstream-sync` branch; do not create version-specific synchronization branches
+- Never promote or deploy an upstream merge until the compatibility report is `passed`
+
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)

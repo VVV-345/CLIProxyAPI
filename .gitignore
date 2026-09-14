@@ -39,6 +39,8 @@ AGENTS.override.md
 .vscode/*
 .worktrees/
 .codex/*
+!.codex/upstream-sync-status.json
+!.codex/upstream-sync-review.md
 .claude/*
 .claude
 .gemini/*
