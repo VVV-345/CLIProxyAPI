@@ -12,6 +12,23 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// ShouldPrepareRequestAuth reports whether an xAI OAuth token needs refreshing before use.
+func (e *XAIExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || xaiMetadataString(auth.Metadata, "refresh_token") == "" {
+		return false
+	}
+	expiresAt, hasExpiry := auth.ExpirationTime()
+	return hasExpiry && !expiresAt.After(time.Now().Add(xaiauth.RefreshLead()))
+}
+
+// PrepareRequestAuth refreshes an expiring xAI OAuth token before the upstream request starts.
+func (e *XAIExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil || !e.ShouldPrepareRequestAuth(auth) {
+		return auth, nil
+	}
+	return e.Refresh(ctx, auth)
+}
+
 // Refresh refreshes xAI OAuth credentials using the stored refresh token.
 func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("xai executor: refresh called")

@@ -38,6 +38,98 @@ func testContextWithAPIKey(apiKey string) context.Context {
 	return context.WithValue(context.Background(), "gin", ginCtx)
 }
 
+func TestXAIExecutorRequestPreparationRefreshDecision(t *testing.T) {
+	executor := NewXAIExecutor(&config.Config{})
+	now := time.Now()
+	tests := []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want bool
+	}{
+		{
+			name: "expired oauth token",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{
+				"refresh_token": "refresh-token",
+				"expired":       now.Add(-time.Minute).Format(time.RFC3339),
+			}},
+			want: true,
+		},
+		{
+			name: "oauth token inside refresh lead",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{
+				"refresh_token": "refresh-token",
+				"expired":       now.Add(xaiauth.RefreshLead() - time.Minute).Format(time.RFC3339),
+			}},
+			want: true,
+		},
+		{
+			name: "oauth token outside refresh lead",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{
+				"refresh_token": "refresh-token",
+				"expired":       now.Add(xaiauth.RefreshLead() + time.Minute).Format(time.RFC3339),
+			}},
+		},
+		{
+			name: "api key credential",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{
+				"expired": now.Add(-time.Minute).Format(time.RFC3339),
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := executor.ShouldPrepareRequestAuth(tt.auth); got != tt.want {
+				t.Fatalf("ShouldPrepareRequestAuth() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestXAIExecutorPrepareRequestAuthRefreshesExpiringToken(t *testing.T) {
+	var tokenCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenCalls++
+		if errParse := r.ParseForm(); errParse != nil {
+			t.Fatalf("ParseForm() error = %v", errParse)
+		}
+		if got := r.Form.Get("refresh_token"); got != "old-refresh" {
+			t.Fatalf("refresh_token = %q, want old-refresh", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-expired",
+		Provider: "xai",
+		Metadata: map[string]any{
+			"access_token":   "old-access",
+			"refresh_token":  "old-refresh",
+			"token_endpoint": server.URL,
+			"expired":        time.Now().Add(-time.Minute).Format(time.RFC3339),
+		},
+	}
+	executor := NewXAIAutoExecutor(&config.Config{})
+	updated, errPrepare := executor.PrepareRequestAuth(context.Background(), auth)
+	if errPrepare != nil {
+		t.Fatalf("PrepareRequestAuth() error = %v", errPrepare)
+	}
+	if tokenCalls != 1 {
+		t.Fatalf("token endpoint calls = %d, want 1", tokenCalls)
+	}
+	if got := xaiMetadataString(updated.Metadata, "access_token"); got != "new-access" {
+		t.Fatalf("access_token = %q, want new-access", got)
+	}
+	if got := xaiMetadataString(updated.Metadata, "refresh_token"); got != "new-refresh" {
+		t.Fatalf("refresh_token = %q, want new-refresh", got)
+	}
+	if executor.ShouldPrepareRequestAuth(updated) {
+		t.Fatal("ShouldPrepareRequestAuth() = true after successful refresh")
+	}
+}
+
 func TestCountXAIInputTokensExcludesRequestStructure(t *testing.T) {
 	enc, err := tokenizer.Get(tokenizer.O200kBase)
 	if err != nil {
