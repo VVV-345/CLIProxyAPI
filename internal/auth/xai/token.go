@@ -14,20 +14,29 @@ import (
 
 // TokenStorage stores xAI OAuth credentials on disk.
 type TokenStorage struct {
-	Type          string `json:"type"`
-	AccessToken   string `json:"access_token"`
-	RefreshToken  string `json:"refresh_token"`
-	IDToken       string `json:"id_token,omitempty"`
-	TokenType     string `json:"token_type,omitempty"`
-	ExpiresIn     int    `json:"expires_in,omitempty"`
-	Expire        string `json:"expired,omitempty"`
-	LastRefresh   string `json:"last_refresh,omitempty"`
-	Email         string `json:"email,omitempty"`
-	Subject       string `json:"sub,omitempty"`
-	BaseURL       string `json:"base_url,omitempty"`
-	RedirectURI   string `json:"redirect_uri,omitempty"`
-	TokenEndpoint string `json:"token_endpoint,omitempty"`
-	AuthKind      string `json:"auth_kind,omitempty"`
+	Type                      string `json:"type"`
+	AccessToken               string `json:"access_token"`
+	RefreshToken              string `json:"refresh_token"`
+	IDToken                   string `json:"id_token,omitempty"`
+	TokenType                 string `json:"token_type,omitempty"`
+	ExpiresIn                 int    `json:"expires_in,omitempty"`
+	Expire                    string `json:"expired,omitempty"`
+	LastRefresh               string `json:"last_refresh,omitempty"`
+	Email                     string `json:"email,omitempty"`
+	Subject                   string `json:"sub,omitempty"`
+	FirstName                 string `json:"first_name,omitempty"`
+	LastName                  string `json:"last_name,omitempty"`
+	UserID                    string `json:"user_id,omitempty"`
+	PrincipalID               string `json:"principal_id,omitempty"`
+	PrincipalType             string `json:"principal_type,omitempty"`
+	TeamID                    string `json:"team_id,omitempty"`
+	ProfileImageAssetID       string `json:"profile_image_asset_id,omitempty"`
+	CodingDataRetentionOptOut *bool  `json:"coding_data_retention_opt_out,omitempty"`
+	BaseURL                   string `json:"base_url,omitempty"`
+	RedirectURI               string `json:"redirect_uri,omitempty"`
+	TokenEndpoint             string `json:"token_endpoint,omitempty"`
+	UserInfoEndpoint          string `json:"userinfo_endpoint,omitempty"`
+	AuthKind                  string `json:"auth_kind,omitempty"`
 
 	Metadata map[string]any `json:"-"`
 }

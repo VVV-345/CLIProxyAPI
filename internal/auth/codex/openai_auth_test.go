@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,35 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestNewCodexAuthDoesNotSetRequestTimeout(t *testing.T) {
 	if got := NewCodexAuth(nil).httpClient.Timeout; got != 0 {
 		t.Fatalf("HTTP client timeout = %s, want zero", got)
+	}
+}
+
+func TestGenerateAuthURLUsesCompatibleScopesAndLocalCallback(t *testing.T) {
+	authURL, errGenerate := (&CodexAuth{}).GenerateAuthURL("state-value", &PKCECodes{
+		CodeChallenge: "challenge-value",
+		CodeVerifier:  "verifier-value",
+	})
+	if errGenerate != nil {
+		t.Fatalf("GenerateAuthURL() error = %v", errGenerate)
+	}
+	parsed, errParse := url.Parse(authURL)
+	if errParse != nil {
+		t.Fatalf("parse authorization URL: %v", errParse)
+	}
+	query := parsed.Query()
+	if got := query.Get("scope"); got != CodexOAuthScope {
+		t.Fatalf("scope = %q, want %q", got, CodexOAuthScope)
+	}
+	if got := query.Get("redirect_uri"); got != RedirectURI {
+		t.Fatalf("redirect_uri = %q, want %q", got, RedirectURI)
+	}
+	if got := query.Get("codex_streamlined_login"); got != "true" {
+		t.Fatalf("codex_streamlined_login = %q, want true", got)
+	}
+	for _, desktopOnly := range []string{"originator", "codex_app_version", "source_surface_stable_id", "codex_origin_stable_id"} {
+		if query.Has(desktopOnly) {
+			t.Fatalf("authorization URL unexpectedly contains desktop-only parameter %q", desktopOnly)
+		}
 	}
 }
 

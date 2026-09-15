@@ -22,6 +22,16 @@ type XAIAuth struct {
 	httpClient *http.Client
 }
 
+type tokenResponse struct {
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	IDToken          string `json:"id_token"`
+	TokenType        string `json:"token_type"`
+	ExpiresIn        int    `json:"expires_in"`
+}
+
 var xaiRefreshGroup singleflight.Group
 
 // NewXAIAuth creates an xAI OAuth helper using config proxy settings.
@@ -92,6 +102,7 @@ func (a *XAIAuth) Discover(ctx context.Context) (*Discovery, error) {
 	var payload struct {
 		DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
 		TokenEndpoint               string `json:"token_endpoint"`
+		UserInfoEndpoint            string `json:"userinfo_endpoint"`
 	}
 	if err = json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("xai discovery: parse response: %w", err)
@@ -104,9 +115,17 @@ func (a *XAIAuth) Discover(ctx context.Context) (*Discovery, error) {
 	if err != nil {
 		return nil, err
 	}
+	userInfoEndpoint := ""
+	if strings.TrimSpace(payload.UserInfoEndpoint) != "" {
+		userInfoEndpoint, err = ValidateOAuthEndpoint(payload.UserInfoEndpoint, "userinfo_endpoint")
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &Discovery{
 		DeviceAuthorizationEndpoint: deviceAuthorizationEndpoint,
 		TokenEndpoint:               tokenEndpoint,
+		UserInfoEndpoint:            userInfoEndpoint,
 	}, nil
 }
 
@@ -116,7 +135,12 @@ func (a *XAIAuth) StartDeviceFlow(ctx context.Context) (*DeviceCodeResponse, err
 	if errDiscover != nil {
 		return nil, errDiscover
 	}
-	return a.RequestDeviceCode(ctx, discovery.DeviceAuthorizationEndpoint, discovery.TokenEndpoint)
+	deviceCode, errRequest := a.RequestDeviceCode(ctx, discovery.DeviceAuthorizationEndpoint, discovery.TokenEndpoint)
+	if errRequest != nil {
+		return nil, errRequest
+	}
+	deviceCode.UserInfoEndpoint = discovery.UserInfoEndpoint
+	return deviceCode, nil
 }
 
 // RequestDeviceCode requests a device authorization code from the given endpoint.
@@ -185,11 +209,15 @@ func (a *XAIAuth) WaitForAuthorization(ctx context.Context, deviceCode *DeviceCo
 	if deviceCode != nil {
 		tokenEndpoint = strings.TrimSpace(deviceCode.TokenEndpoint)
 	}
+	if errIdentity := a.HydrateIdentity(ctx, tokenData, deviceCode.UserInfoEndpoint); errIdentity != nil {
+		log.WithError(errIdentity).Debug("xai userinfo request failed")
+	}
 	return &AuthBundle{
-		TokenData:     *tokenData,
-		LastRefresh:   time.Now().UTC().Format(time.RFC3339),
-		BaseURL:       DefaultAPIBaseURL,
-		TokenEndpoint: tokenEndpoint,
+		TokenData:        *tokenData,
+		LastRefresh:      time.Now().UTC().Format(time.RFC3339),
+		BaseURL:          DefaultAPIBaseURL,
+		TokenEndpoint:    tokenEndpoint,
+		UserInfoEndpoint: strings.TrimSpace(deviceCode.UserInfoEndpoint),
 	}, nil
 }
 
@@ -283,15 +311,7 @@ func (a *XAIAuth) exchangeDeviceCode(ctx context.Context, tokenEndpoint, deviceC
 		return nil, fmt.Errorf("xai device token: read response: %w", err), interval, false
 	}
 
-	var payload struct {
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description"`
-		AccessToken      string `json:"access_token"`
-		RefreshToken     string `json:"refresh_token"`
-		IDToken          string `json:"id_token"`
-		TokenType        string `json:"token_type"`
-		ExpiresIn        int    `json:"expires_in"`
-	}
+	var payload tokenResponse
 	if err = json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("xai device token: parse response: %w", err), interval, false
 	}
@@ -323,8 +343,7 @@ func (a *XAIAuth) exchangeDeviceCode(ctx context.Context, tokenEndpoint, deviceC
 		return nil, fmt.Errorf("xai device token response missing access_token"), interval, false
 	}
 
-	email, subject := parseJWTIdentity(payload.IDToken)
-	return buildTokenData(payload.AccessToken, payload.RefreshToken, payload.IDToken, payload.TokenType, payload.ExpiresIn, email, subject), nil, interval, false
+	return buildTokenDataFromResponse(payload), nil, interval, false
 }
 
 // RefreshTokens refreshes an xAI access token.
@@ -393,21 +412,58 @@ func (a *XAIAuth) postTokenForm(ctx context.Context, tokenEndpoint string, form 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("xai token request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	var payload struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		IDToken      string `json:"id_token"`
-		TokenType    string `json:"token_type"`
-		ExpiresIn    int    `json:"expires_in"`
-	}
+	var payload tokenResponse
 	if err = json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("xai token response: parse body: %w", err)
 	}
 	if strings.TrimSpace(payload.AccessToken) == "" {
 		return nil, fmt.Errorf("xai token response missing access_token")
 	}
-	email, subject := parseJWTIdentity(payload.IDToken)
-	return buildTokenData(payload.AccessToken, payload.RefreshToken, payload.IDToken, payload.TokenType, payload.ExpiresIn, email, subject), nil
+	return buildTokenDataFromResponse(payload), nil
+}
+
+// HydrateIdentity merges access-token claims, ID-token claims, and OIDC userinfo.
+func (a *XAIAuth) HydrateIdentity(ctx context.Context, tokenData *TokenData, userInfoEndpoint string) error {
+	if tokenData == nil {
+		return nil
+	}
+	claims := mergeClaims(parseJWTClaims(tokenData.AccessToken), parseJWTClaims(tokenData.IDToken))
+	endpoint := strings.TrimSpace(userInfoEndpoint)
+	if endpoint != "" && strings.TrimSpace(tokenData.AccessToken) != "" {
+		validatedEndpoint, errValidate := ValidateOAuthEndpoint(endpoint, "userinfo_endpoint")
+		if errValidate != nil {
+			return errValidate
+		}
+		req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, validatedEndpoint, nil)
+		if errRequest != nil {
+			return fmt.Errorf("xai userinfo: create request: %w", errRequest)
+		}
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(tokenData.AccessToken))
+		req.Header.Set("Accept", "application/json")
+		resp, errDo := a.httpClient.Do(req)
+		if errDo != nil {
+			return fmt.Errorf("xai userinfo request failed: %w", errDo)
+		}
+		defer func() {
+			if errClose := resp.Body.Close(); errClose != nil {
+				log.Errorf("xai userinfo: close response body error: %v", errClose)
+			}
+		}()
+		body, errRead := io.ReadAll(resp.Body)
+		if errRead != nil {
+			return fmt.Errorf("xai userinfo: read response: %w", errRead)
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return fmt.Errorf("xai userinfo request failed with status %d", resp.StatusCode)
+		}
+		var userInfo map[string]any
+		if errUnmarshal := json.Unmarshal(body, &userInfo); errUnmarshal != nil {
+			return fmt.Errorf("xai userinfo: parse response: %w", errUnmarshal)
+		}
+		claims = mergeClaims(claims, userInfo)
+	}
+	applyIdentityClaims(tokenData, claims)
+	return nil
 }
 
 // CreateTokenStorage converts an auth bundle into persistable storage.
@@ -416,20 +472,29 @@ func (a *XAIAuth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 		return nil
 	}
 	return &TokenStorage{
-		Type:          "xai",
-		AccessToken:   bundle.TokenData.AccessToken,
-		RefreshToken:  bundle.TokenData.RefreshToken,
-		IDToken:       bundle.TokenData.IDToken,
-		TokenType:     bundle.TokenData.TokenType,
-		ExpiresIn:     bundle.TokenData.ExpiresIn,
-		Expire:        bundle.TokenData.Expire,
-		LastRefresh:   bundle.LastRefresh,
-		Email:         strings.TrimSpace(bundle.TokenData.Email),
-		Subject:       bundle.TokenData.Subject,
-		BaseURL:       firstNonEmpty(bundle.BaseURL, DefaultAPIBaseURL),
-		RedirectURI:   bundle.RedirectURI,
-		TokenEndpoint: bundle.TokenEndpoint,
-		AuthKind:      "oauth",
+		Type:                      "xai",
+		AccessToken:               bundle.TokenData.AccessToken,
+		RefreshToken:              bundle.TokenData.RefreshToken,
+		IDToken:                   bundle.TokenData.IDToken,
+		TokenType:                 bundle.TokenData.TokenType,
+		ExpiresIn:                 bundle.TokenData.ExpiresIn,
+		Expire:                    bundle.TokenData.Expire,
+		LastRefresh:               bundle.LastRefresh,
+		Email:                     strings.TrimSpace(bundle.TokenData.Email),
+		Subject:                   bundle.TokenData.Subject,
+		FirstName:                 bundle.TokenData.FirstName,
+		LastName:                  bundle.TokenData.LastName,
+		UserID:                    bundle.TokenData.UserID,
+		PrincipalID:               bundle.TokenData.PrincipalID,
+		PrincipalType:             bundle.TokenData.PrincipalType,
+		TeamID:                    bundle.TokenData.TeamID,
+		ProfileImageAssetID:       bundle.TokenData.ProfileImageAssetID,
+		CodingDataRetentionOptOut: bundle.TokenData.CodingDataRetentionOptOut,
+		BaseURL:                   firstNonEmpty(bundle.BaseURL, DefaultAPIBaseURL),
+		RedirectURI:               bundle.RedirectURI,
+		TokenEndpoint:             bundle.TokenEndpoint,
+		UserInfoEndpoint:          bundle.UserInfoEndpoint,
+		AuthKind:                  "oauth",
 	}
 }
 
@@ -449,28 +514,81 @@ func buildTokenData(accessToken, refreshToken, idToken, tokenType string, expire
 	return tokenData
 }
 
+func buildTokenDataFromResponse(payload tokenResponse) *TokenData {
+	tokenData := buildTokenData(payload.AccessToken, payload.RefreshToken, payload.IDToken, payload.TokenType, payload.ExpiresIn, "", "")
+	applyIdentityClaims(tokenData, mergeClaims(parseJWTClaims(payload.AccessToken), parseJWTClaims(payload.IDToken)))
+	return tokenData
+}
+
 func parseJWTIdentity(token string) (email string, subject string) {
-	parts := strings.Split(token, ".")
+	claims := parseJWTClaims(token)
+	return claimString(claims, "email", "preferred_username"), claimString(claims, "sub")
+}
+
+func parseJWTClaims(token string) map[string]any {
+	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) < 2 {
-		return "", ""
+		return nil
 	}
 	payload := parts[1]
 	payload += strings.Repeat("=", (4-len(payload)%4)%4)
-	raw, err := base64.URLEncoding.DecodeString(payload)
-	if err != nil {
-		return "", ""
+	raw, errDecode := base64.URLEncoding.DecodeString(payload)
+	if errDecode != nil {
+		return nil
 	}
 	var claims map[string]any
-	if err = json.Unmarshal(raw, &claims); err != nil {
-		return "", ""
+	if errUnmarshal := json.Unmarshal(raw, &claims); errUnmarshal != nil {
+		return nil
 	}
-	if v, ok := claims["email"].(string); ok {
-		email = strings.TrimSpace(v)
+	return claims
+}
+
+func mergeClaims(fallback, primary map[string]any) map[string]any {
+	merged := make(map[string]any, len(fallback)+len(primary))
+	for key, value := range fallback {
+		merged[key] = value
 	}
-	if v, ok := claims["sub"].(string); ok {
-		subject = strings.TrimSpace(v)
+	for key, value := range primary {
+		merged[key] = value
 	}
-	return email, subject
+	return merged
+}
+
+func claimString(claims map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := claims[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func claimBool(claims map[string]any, keys ...string) *bool {
+	for _, key := range keys {
+		if value, ok := claims[key].(bool); ok {
+			result := value
+			return &result
+		}
+	}
+	return nil
+}
+
+func applyIdentityClaims(tokenData *TokenData, claims map[string]any) {
+	if tokenData == nil {
+		return
+	}
+	tokenData.Email = firstNonEmpty(claimString(claims, "email", "preferred_username"), tokenData.Email)
+	tokenData.Subject = firstNonEmpty(claimString(claims, "sub"), tokenData.Subject)
+	tokenData.FirstName = claimString(claims, "first_name", "given_name")
+	tokenData.LastName = claimString(claims, "last_name", "family_name")
+	tokenData.PrincipalID = firstNonEmpty(claimString(claims, "principal_id", "sub"), tokenData.Subject)
+	tokenData.UserID = firstNonEmpty(claimString(claims, "user_id", "uid"), tokenData.PrincipalID)
+	tokenData.PrincipalType = firstNonEmpty(claimString(claims, "principal_type"), "User")
+	tokenData.TeamID = claimString(claims, "team_id")
+	tokenData.ProfileImageAssetID = claimString(claims, "profile_image_asset_id", "picture")
+	tokenData.CodingDataRetentionOptOut = claimBool(claims, "coding_data_retention_opt_out")
 }
 
 func firstNonEmpty(values ...string) string {

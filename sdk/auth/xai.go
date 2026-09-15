@@ -96,17 +96,22 @@ func (a XAIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *L
 	}
 
 	metadata := map[string]any{
-		"type":           "xai",
-		"access_token":   tokenStorage.AccessToken,
-		"refresh_token":  tokenStorage.RefreshToken,
-		"id_token":       tokenStorage.IDToken,
-		"token_type":     tokenStorage.TokenType,
-		"expires_in":     tokenStorage.ExpiresIn,
-		"expired":        tokenStorage.Expire,
-		"last_refresh":   tokenStorage.LastRefresh,
-		"base_url":       tokenStorage.BaseURL,
-		"token_endpoint": tokenStorage.TokenEndpoint,
-		"auth_kind":      "oauth",
+		"type":              "xai",
+		"access_token":      tokenStorage.AccessToken,
+		"refresh_token":     tokenStorage.RefreshToken,
+		"id_token":          tokenStorage.IDToken,
+		"token_type":        tokenStorage.TokenType,
+		"expires_in":        tokenStorage.ExpiresIn,
+		"expired":           tokenStorage.Expire,
+		"last_refresh":      tokenStorage.LastRefresh,
+		"base_url":          tokenStorage.BaseURL,
+		"token_endpoint":    tokenStorage.TokenEndpoint,
+		"userinfo_endpoint": tokenStorage.UserInfoEndpoint,
+		"auth_kind":         "oauth",
+		"auth_mode":         "oidc",
+		"oidc_issuer":       xaiauth.Issuer,
+		"oidc_client_id":    xaiauth.ClientID,
+		"key":               tokenStorage.AccessToken,
 	}
 	if tokenStorage.Email != "" {
 		metadata["email"] = tokenStorage.Email
@@ -114,6 +119,7 @@ func (a XAIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *L
 	if tokenStorage.Subject != "" {
 		metadata["sub"] = tokenStorage.Subject
 	}
+	addXAIIdentityMetadata(metadata, tokenStorage)
 
 	fmt.Println("xAI authentication successful")
 
@@ -129,4 +135,27 @@ func (a XAIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *L
 			"base_url":  tokenStorage.BaseURL,
 		},
 	}, nil
+}
+
+func addXAIIdentityMetadata(metadata map[string]any, tokenStorage *xaiauth.TokenStorage) {
+	if metadata == nil || tokenStorage == nil {
+		return
+	}
+	values := map[string]string{
+		"first_name":             tokenStorage.FirstName,
+		"last_name":              tokenStorage.LastName,
+		"user_id":                tokenStorage.UserID,
+		"principal_id":           tokenStorage.PrincipalID,
+		"principal_type":         tokenStorage.PrincipalType,
+		"team_id":                tokenStorage.TeamID,
+		"profile_image_asset_id": tokenStorage.ProfileImageAssetID,
+	}
+	for key, value := range values {
+		if strings.TrimSpace(value) != "" {
+			metadata[key] = strings.TrimSpace(value)
+		}
+	}
+	if tokenStorage.CodingDataRetentionOptOut != nil {
+		metadata["coding_data_retention_opt_out"] = *tokenStorage.CodingDataRetentionOptOut
+	}
 }

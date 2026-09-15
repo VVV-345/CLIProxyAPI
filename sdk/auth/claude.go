@@ -213,6 +213,39 @@ waitForCallback:
 	if tokenStorage.OrganizationName != "" {
 		metadata["organization_name"] = tokenStorage.OrganizationName
 	}
+	if tokenStorage.DisplayName != "" {
+		metadata["display_name"] = tokenStorage.DisplayName
+	}
+	if tokenStorage.AvatarURL != "" {
+		metadata["avatar_url"] = tokenStorage.AvatarURL
+	}
+	if tokenStorage.AccountCreatedAt != "" {
+		metadata["account_created_at"] = tokenStorage.AccountCreatedAt
+	}
+	if tokenStorage.OrganizationType != "" {
+		metadata["organization_type"] = tokenStorage.OrganizationType
+	}
+	if tokenStorage.BillingType != "" {
+		metadata["billing_type"] = tokenStorage.BillingType
+	}
+	if tokenStorage.RateLimitTier != "" {
+		metadata["rate_limit_tier"] = tokenStorage.RateLimitTier
+	}
+	if tokenStorage.SubscriptionCreatedAt != "" {
+		metadata["subscription_created_at"] = tokenStorage.SubscriptionCreatedAt
+	}
+	if tokenStorage.SubscriptionStatus != "" {
+		metadata["subscription_status"] = tokenStorage.SubscriptionStatus
+	}
+	if tokenStorage.HasExtraUsageEnabled != nil {
+		metadata["has_extra_usage_enabled"] = *tokenStorage.HasExtraUsageEnabled
+	}
+	if tokenStorage.HasClaudeMax != nil {
+		metadata["has_claude_max"] = *tokenStorage.HasClaudeMax
+	}
+	if tokenStorage.HasClaudePro != nil {
+		metadata["has_claude_pro"] = *tokenStorage.HasClaudePro
+	}
 	if len(tokenStorage.DeviceIDs) > 0 {
 		metadata[claude.ClaudeDeviceIDsMetadataKey] = append([]string(nil), tokenStorage.DeviceIDs...)
 	}

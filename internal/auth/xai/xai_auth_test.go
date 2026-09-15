@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,12 @@ import (
 
 	"golang.org/x/sync/singleflight"
 )
+
+type xaiRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f xaiRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func resetXAIRefreshGroupForTest() {
 	xaiRefreshGroup = singleflight.Group{}
@@ -320,8 +327,65 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	}
 }
 
+func TestHydrateIdentityMergesAccessIDAndUserInfoClaims(t *testing.T) {
+	auth := NewXAIAuth(nil)
+	auth.httpClient = &http.Client{Transport: xaiRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.URL.String(); got != "https://auth.x.ai/oauth2/userinfo" {
+			t.Fatalf("URL = %q, want xAI userinfo endpoint", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
+			t.Fatalf("Authorization = %q, want bearer access token", got)
+		}
+		body, errMarshal := json.Marshal(map[string]any{
+			"email":                         "userinfo@x.ai",
+			"first_name":                    "Ada",
+			"last_name":                     "Lovelace",
+			"user_id":                       "user-1",
+			"principal_type":                "User",
+			"team_id":                       "team-1",
+			"profile_image_asset_id":        "asset-1",
+			"coding_data_retention_opt_out": true,
+		})
+		if errMarshal != nil {
+			return nil, errMarshal
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(string(body))),
+			Request:    r,
+		}, nil
+	})}
+
+	tokenData := &TokenData{
+		AccessToken: "access-token",
+		IDToken: fakeJWT(map[string]any{
+			"email":        "id-token@x.ai",
+			"sub":          "principal-1",
+			"principal_id": "principal-1",
+		}),
+	}
+	if errHydrate := auth.HydrateIdentity(context.Background(), tokenData, "https://auth.x.ai/oauth2/userinfo"); errHydrate != nil {
+		t.Fatalf("HydrateIdentity() error = %v", errHydrate)
+	}
+	if tokenData.Email != "userinfo@x.ai" || tokenData.UserID != "user-1" || tokenData.PrincipalID != "principal-1" {
+		t.Fatalf("unexpected identity: %#v", tokenData)
+	}
+	if tokenData.FirstName != "Ada" || tokenData.LastName != "Lovelace" || tokenData.TeamID != "team-1" {
+		t.Fatalf("unexpected profile fields: %#v", tokenData)
+	}
+	if tokenData.CodingDataRetentionOptOut == nil || !*tokenData.CodingDataRetentionOptOut {
+		t.Fatalf("coding_data_retention_opt_out = %v, want true", tokenData.CodingDataRetentionOptOut)
+	}
+}
+
 func fakeJWTWithEmail(email, subject string) string {
+	return fakeJWT(map[string]any{"email": email, "sub": subject})
+}
+
+func fakeJWT(claims map[string]any) string {
 	header := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
-	payload := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(`{"email":"` + email + `","sub":"` + subject + `"}`))
+	payloadJSON, _ := json.Marshal(claims)
+	payload := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(payloadJSON)
 	return header + "." + payload + ".sig"
 }

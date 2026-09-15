@@ -39,7 +39,18 @@ type ClaudeTokenStorage struct {
 	OrganizationUUID string `json:"organization_uuid,omitempty"`
 
 	// OrganizationName is the display name returned by OAuth.
-	OrganizationName string `json:"organization_name,omitempty"`
+	OrganizationName      string `json:"organization_name,omitempty"`
+	DisplayName           string `json:"display_name,omitempty"`
+	AvatarURL             string `json:"avatar_url,omitempty"`
+	AccountCreatedAt      string `json:"account_created_at,omitempty"`
+	OrganizationType      string `json:"organization_type,omitempty"`
+	BillingType           string `json:"billing_type,omitempty"`
+	RateLimitTier         string `json:"rate_limit_tier,omitempty"`
+	SubscriptionCreatedAt string `json:"subscription_created_at,omitempty"`
+	SubscriptionStatus    string `json:"subscription_status,omitempty"`
+	HasExtraUsageEnabled  *bool  `json:"has_extra_usage_enabled,omitempty"`
+	HasClaudeMax          *bool  `json:"has_claude_max,omitempty"`
+	HasClaudePro          *bool  `json:"has_claude_pro,omitempty"`
 
 	// DeviceIDs contains the single device identity assigned to this credential.
 	DeviceIDs []string `json:"claude_device_ids,omitempty"`

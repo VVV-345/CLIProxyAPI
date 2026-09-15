@@ -21,7 +21,7 @@ import (
 
 // OAuth configuration constants for Claude/Anthropic
 const (
-	AuthURL = "https://claude.ai/oauth/authorize"
+	AuthURL = "https://claude.com/cai/oauth/authorize"
 	// TokenURL is the authorization-code exchange endpoint. Claude Code 2.1.220
 	// posts the code exchange to platform.claude.com, not api.anthropic.com.
 	TokenURL        = "https://platform.claude.com/v1/oauth/token"
@@ -32,7 +32,7 @@ const (
 	RolesURL         = "https://api.anthropic.com/api/oauth/claude_cli/roles"
 	ClientID         = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	RedirectURI      = "http://localhost:54545/callback"
-	ClaudeOAuthScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	ClaudeOAuthScope = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
 	claudeRefreshMinBackoff       = 5 * time.Second
 	claudeRefreshMaxBackoff       = 5 * time.Minute
@@ -155,13 +155,53 @@ type authorizationCodeExchangeRequest struct {
 // OAuthProfile is the account identity returned by Anthropic's OAuth profile endpoint.
 type OAuthProfile struct {
 	Account struct {
-		UUID  string `json:"uuid"`
-		Email string `json:"email"`
+		UUID         string `json:"uuid"`
+		Email        string `json:"email"`
+		DisplayName  string `json:"display_name"`
+		AvatarURL    string `json:"avatar_url"`
+		CreatedAt    string `json:"created_at"`
+		HasClaudeMax *bool  `json:"has_claude_max"`
+		HasClaudePro *bool  `json:"has_claude_pro"`
 	} `json:"account"`
 	Organization struct {
-		UUID string `json:"uuid"`
-		Name string `json:"name"`
+		UUID                  string `json:"uuid"`
+		Name                  string `json:"name"`
+		OrganizationType      string `json:"organization_type"`
+		BillingType           string `json:"billing_type"`
+		RateLimitTier         string `json:"rate_limit_tier"`
+		SubscriptionCreatedAt string `json:"subscription_created_at"`
+		SubscriptionStatus    string `json:"subscription_status"`
+		HasExtraUsageEnabled  *bool  `json:"has_extra_usage_enabled"`
 	} `json:"organization"`
+}
+
+func applyOAuthProfile(tokenData *ClaudeTokenData, profile *OAuthProfile) {
+	if tokenData == nil || profile == nil {
+		return
+	}
+	if value := strings.TrimSpace(profile.Account.UUID); value != "" {
+		tokenData.AccountUUID = value
+	}
+	if value := strings.TrimSpace(profile.Account.Email); value != "" {
+		tokenData.Email = value
+	}
+	if value := strings.TrimSpace(profile.Organization.UUID); value != "" {
+		tokenData.OrganizationUUID = value
+	}
+	if value := strings.TrimSpace(profile.Organization.Name); value != "" {
+		tokenData.OrganizationName = value
+	}
+	tokenData.DisplayName = strings.TrimSpace(profile.Account.DisplayName)
+	tokenData.AvatarURL = strings.TrimSpace(profile.Account.AvatarURL)
+	tokenData.AccountCreatedAt = strings.TrimSpace(profile.Account.CreatedAt)
+	tokenData.OrganizationType = strings.TrimSpace(profile.Organization.OrganizationType)
+	tokenData.BillingType = strings.TrimSpace(profile.Organization.BillingType)
+	tokenData.RateLimitTier = strings.TrimSpace(profile.Organization.RateLimitTier)
+	tokenData.SubscriptionCreatedAt = strings.TrimSpace(profile.Organization.SubscriptionCreatedAt)
+	tokenData.SubscriptionStatus = strings.TrimSpace(profile.Organization.SubscriptionStatus)
+	tokenData.HasExtraUsageEnabled = profile.Organization.HasExtraUsageEnabled
+	tokenData.HasClaudeMax = profile.Account.HasClaudeMax
+	tokenData.HasClaudePro = profile.Account.HasClaudePro
 }
 
 // ClaudeAuth handles Anthropic OAuth2 authentication flow.
@@ -448,18 +488,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 	// Replay the native login companion lookups and let the profile response win
 	// where it carries identity the token response omitted.
 	if profile := o.inspectOAuthAccount(ctx, tokenResp.AccessToken); profile != nil {
-		if value := strings.TrimSpace(profile.Account.UUID); value != "" {
-			tokenData.AccountUUID = value
-		}
-		if value := strings.TrimSpace(profile.Account.Email); value != "" {
-			tokenData.Email = value
-		}
-		if value := strings.TrimSpace(profile.Organization.UUID); value != "" {
-			tokenData.OrganizationUUID = value
-		}
-		if value := strings.TrimSpace(profile.Organization.Name); value != "" {
-			tokenData.OrganizationName = value
-		}
+		applyOAuthProfile(&tokenData, profile)
 	}
 
 	// Create auth bundle.
@@ -589,10 +618,7 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 		log.Warnf("fetch Claude OAuth profile after refresh: %v", errProfile)
 		return tokenData, nil
 	}
-	tokenData.Email = profile.Account.Email
-	tokenData.AccountUUID = profile.Account.UUID
-	tokenData.OrganizationUUID = profile.Organization.UUID
-	tokenData.OrganizationName = profile.Organization.Name
+	applyOAuthProfile(tokenData, profile)
 	return tokenData, nil
 }
 
@@ -607,15 +633,26 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 //   - *ClaudeTokenStorage: A new token storage instance
 func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenStorage {
 	storage := &ClaudeTokenStorage{
-		AccessToken:      bundle.TokenData.AccessToken,
-		RefreshToken:     bundle.TokenData.RefreshToken,
-		LastRefresh:      bundle.LastRefresh,
-		Email:            bundle.TokenData.Email,
-		AccountUUID:      bundle.TokenData.AccountUUID,
-		OrganizationUUID: bundle.TokenData.OrganizationUUID,
-		OrganizationName: bundle.TokenData.OrganizationName,
-		DeviceIDs:        append([]string(nil), bundle.DeviceIDs...),
-		Expire:           bundle.TokenData.Expire,
+		AccessToken:           bundle.TokenData.AccessToken,
+		RefreshToken:          bundle.TokenData.RefreshToken,
+		LastRefresh:           bundle.LastRefresh,
+		Email:                 bundle.TokenData.Email,
+		AccountUUID:           bundle.TokenData.AccountUUID,
+		OrganizationUUID:      bundle.TokenData.OrganizationUUID,
+		OrganizationName:      bundle.TokenData.OrganizationName,
+		DisplayName:           bundle.TokenData.DisplayName,
+		AvatarURL:             bundle.TokenData.AvatarURL,
+		AccountCreatedAt:      bundle.TokenData.AccountCreatedAt,
+		OrganizationType:      bundle.TokenData.OrganizationType,
+		BillingType:           bundle.TokenData.BillingType,
+		RateLimitTier:         bundle.TokenData.RateLimitTier,
+		SubscriptionCreatedAt: bundle.TokenData.SubscriptionCreatedAt,
+		SubscriptionStatus:    bundle.TokenData.SubscriptionStatus,
+		HasExtraUsageEnabled:  bundle.TokenData.HasExtraUsageEnabled,
+		HasClaudeMax:          bundle.TokenData.HasClaudeMax,
+		HasClaudePro:          bundle.TokenData.HasClaudePro,
+		DeviceIDs:             append([]string(nil), bundle.DeviceIDs...),
+		Expire:                bundle.TokenData.Expire,
 	}
 
 	return storage
@@ -683,6 +720,39 @@ func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *
 	}
 	if tokenData.OrganizationName != "" {
 		storage.OrganizationName = tokenData.OrganizationName
+	}
+	if tokenData.DisplayName != "" {
+		storage.DisplayName = tokenData.DisplayName
+	}
+	if tokenData.AvatarURL != "" {
+		storage.AvatarURL = tokenData.AvatarURL
+	}
+	if tokenData.AccountCreatedAt != "" {
+		storage.AccountCreatedAt = tokenData.AccountCreatedAt
+	}
+	if tokenData.OrganizationType != "" {
+		storage.OrganizationType = tokenData.OrganizationType
+	}
+	if tokenData.BillingType != "" {
+		storage.BillingType = tokenData.BillingType
+	}
+	if tokenData.RateLimitTier != "" {
+		storage.RateLimitTier = tokenData.RateLimitTier
+	}
+	if tokenData.SubscriptionCreatedAt != "" {
+		storage.SubscriptionCreatedAt = tokenData.SubscriptionCreatedAt
+	}
+	if tokenData.SubscriptionStatus != "" {
+		storage.SubscriptionStatus = tokenData.SubscriptionStatus
+	}
+	if tokenData.HasExtraUsageEnabled != nil {
+		storage.HasExtraUsageEnabled = tokenData.HasExtraUsageEnabled
+	}
+	if tokenData.HasClaudeMax != nil {
+		storage.HasClaudeMax = tokenData.HasClaudeMax
+	}
+	if tokenData.HasClaudePro != nil {
+		storage.HasClaudePro = tokenData.HasClaudePro
 	}
 	storage.Expire = tokenData.Expire
 }

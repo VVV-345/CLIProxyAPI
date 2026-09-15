@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -18,6 +19,8 @@ import (
 )
 
 const defaultAPICallTimeout = 60 * time.Second
+
+const apiCallGETMaxAttempts = 3
 
 const (
 	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -131,87 +134,139 @@ func (h *Handler) APICall(c *gin.Context) {
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
 
-	reqHeaders := body.Header
-	if reqHeaders == nil {
-		reqHeaders = map[string]string{}
-	}
-
-	var hostOverride string
-	var token string
-	var tokenResolved bool
-	var tokenErr error
-	for key, value := range reqHeaders {
-		if !strings.Contains(value, "$TOKEN$") {
-			continue
-		}
-		if !tokenResolved {
-			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth, requestProxyURL)
-			tokenResolved = true
-		}
-		if auth != nil && token == "" {
-			if tokenErr != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
-				return
-			}
-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
-			return
-		}
-		if token == "" {
-			continue
-		}
-		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
-	}
-
-	var requestBody io.Reader
-	if body.Data != "" {
-		requestBody = strings.NewReader(body.Data)
-	}
-
-	req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
-	if errNewRequest != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to build request"})
-		return
-	}
-
-	for key, value := range reqHeaders {
-		if strings.EqualFold(key, "host") {
-			hostOverride = strings.TrimSpace(value)
-			continue
-		}
-		req.Header.Set(key, value)
-	}
-	if hostOverride != "" {
-		req.Host = hostOverride
-	}
-
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
-
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		log.WithError(errDo).Debug("management APICall request failed")
+	result, errCall := h.executeAPICall(
+		c.Request.Context(),
+		httpClient,
+		auth,
+		method,
+		urlStr,
+		body.Data,
+		body.Header,
+		requestProxyURL,
+	)
+	if errCall != nil {
+		log.WithError(errCall).Debug("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) executeAPICall(
+	ctx context.Context,
+	httpClient *http.Client,
+	auth *coreauth.Auth,
+	method string,
+	urlStr string,
+	data string,
+	headers map[string]string,
+	requestProxyURL string,
+) (apiCallResponse, error) {
+	maxAttempts := 1
+	if method == http.MethodGet {
+		maxAttempts = apiCallGETMaxAttempts
+	}
+	forceRefreshAvailable := auth != nil && stringValue(auth.Metadata, "refresh_token") != "" && h.authManager != nil
+	forcedRefresh := false
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		result, usedToken, errRequest := h.executeAPICallAttempt(
+			ctx,
+			httpClient,
+			auth,
+			method,
+			urlStr,
+			data,
+			headers,
+			requestProxyURL,
+		)
+		if errRequest != nil {
+			if attempt < maxAttempts {
+				log.WithError(errRequest).WithField("attempt", attempt).Debug("management APICall transport retry")
+				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				continue
+			}
+			return apiCallResponse{}, errRequest
+		}
+		if result.StatusCode == http.StatusUnauthorized && usedToken && forceRefreshAvailable && !forcedRefresh {
+			refreshed, errRefresh := h.authManager.RefreshAuth(ctx, auth.ID)
+			if errRefresh != nil {
+				return apiCallResponse{}, fmt.Errorf("refresh credential after unauthorized response: %w", errRefresh)
+			}
+			if refreshed != nil {
+				auth = refreshed
+			}
+			forcedRefresh = true
+			attempt--
+			continue
+		}
+		return result, nil
+	}
+	return apiCallResponse{}, fmt.Errorf("request attempts exhausted")
+}
+
+func (h *Handler) executeAPICallAttempt(
+	ctx context.Context,
+	httpClient *http.Client,
+	auth *coreauth.Auth,
+	method string,
+	urlStr string,
+	data string,
+	headers map[string]string,
+	requestProxyURL string,
+) (apiCallResponse, bool, error) {
+	token := ""
+	usedToken := false
+	requestHeaders := make(map[string]string, len(headers))
+	for key, value := range headers {
+		if strings.Contains(value, "$TOKEN$") {
+			usedToken = true
+			if token == "" {
+				resolvedToken, errResolve := h.resolveTokenForAuth(ctx, auth, requestProxyURL)
+				if errResolve != nil {
+					return apiCallResponse{}, usedToken, errResolve
+				}
+				token = resolvedToken
+			}
+			if auth != nil && token == "" {
+				return apiCallResponse{}, usedToken, fmt.Errorf("auth token not found")
+			}
+			value = strings.ReplaceAll(value, "$TOKEN$", token)
+		}
+		requestHeaders[key] = value
+	}
+	var requestBody io.Reader
+	if data != "" {
+		requestBody = strings.NewReader(data)
+	}
+	req, errNewRequest := http.NewRequestWithContext(ctx, method, urlStr, requestBody)
+	if errNewRequest != nil {
+		return apiCallResponse{}, usedToken, fmt.Errorf("build request: %w", errNewRequest)
+	}
+	for key, value := range requestHeaders {
+		if strings.EqualFold(key, "host") {
+			req.Host = strings.TrimSpace(value)
+			continue
+		}
+		req.Header.Set(key, value)
+	}
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		return apiCallResponse{}, usedToken, errDo
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
-
 	respBody, errReadAll := io.ReadAll(resp.Body)
 	if errReadAll != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
-		return
+		return apiCallResponse{}, usedToken, errReadAll
 	}
-
-	c.JSON(http.StatusOK, apiCallResponse{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header,
-		Body:       string(respBody),
-	})
+	return apiCallResponse{StatusCode: resp.StatusCode, Header: resp.Header, Body: string(respBody)}, usedToken, nil
 }
 
 func firstNonEmptyString(values ...*string) string {
@@ -250,8 +305,109 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, 
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth, requestProxyURL)
 		return token, errToken
 	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") && stringValue(auth.Metadata, "refresh_token") != "" {
+		token, errToken := h.refreshXAIOAuthAccessToken(ctx, auth, requestProxyURL, false)
+		return token, errToken
+	}
 
 	return tokenValueForAuth(auth), nil
+}
+
+func (h *Handler) refreshXAIOAuthAccessToken(
+	ctx context.Context,
+	auth *coreauth.Auth,
+	requestProxyURL string,
+	force bool,
+) (string, error) {
+	if auth == nil {
+		return "", nil
+	}
+	current := strings.TrimSpace(tokenValueFromMetadata(auth.Metadata))
+	if current != "" && !force && !xaiTokenNeedsRefresh(auth) {
+		return current, nil
+	}
+	refreshToken := stringValue(auth.Metadata, "refresh_token")
+	if refreshToken == "" {
+		return "", fmt.Errorf("xai refresh token missing")
+	}
+	proxyURL := strings.TrimSpace(requestProxyURL)
+	if proxyURL == "" {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && h != nil && h.cfg != nil {
+		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
+	}
+	service := xaiauth.NewXAIAuthWithProxyURL(h.cfg, proxyURL)
+	tokenData, errRefresh := service.RefreshTokens(ctx, refreshToken, stringValue(auth.Metadata, "token_endpoint"))
+	if errRefresh != nil {
+		return "", errRefresh
+	}
+	userInfoEndpoint := stringValue(auth.Metadata, "userinfo_endpoint")
+	if errIdentity := service.HydrateIdentity(ctx, tokenData, userInfoEndpoint); errIdentity != nil {
+		log.WithError(errIdentity).Debug("management APICall xai userinfo refresh failed")
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	now := time.Now()
+	auth.Metadata["type"] = "xai"
+	auth.Metadata["auth_kind"] = "oauth"
+	auth.Metadata["auth_mode"] = "oidc"
+	auth.Metadata["oidc_issuer"] = xaiauth.Issuer
+	auth.Metadata["oidc_client_id"] = xaiauth.ClientID
+	auth.Metadata["access_token"] = tokenData.AccessToken
+	auth.Metadata["key"] = tokenData.AccessToken
+	if tokenData.RefreshToken != "" {
+		auth.Metadata["refresh_token"] = tokenData.RefreshToken
+	}
+	if tokenData.IDToken != "" {
+		auth.Metadata["id_token"] = tokenData.IDToken
+	}
+	if tokenData.TokenType != "" {
+		auth.Metadata["token_type"] = tokenData.TokenType
+	}
+	if tokenData.ExpiresIn > 0 {
+		auth.Metadata["expires_in"] = tokenData.ExpiresIn
+	}
+	if tokenData.Expire != "" {
+		auth.Metadata["expired"] = tokenData.Expire
+	}
+	auth.Metadata["last_refresh"] = now.UTC().Format(time.RFC3339)
+	setMetadataString(auth.Metadata, "email", tokenData.Email)
+	setMetadataString(auth.Metadata, "sub", tokenData.Subject)
+	setMetadataString(auth.Metadata, "first_name", tokenData.FirstName)
+	setMetadataString(auth.Metadata, "last_name", tokenData.LastName)
+	setMetadataString(auth.Metadata, "user_id", tokenData.UserID)
+	setMetadataString(auth.Metadata, "principal_id", tokenData.PrincipalID)
+	setMetadataString(auth.Metadata, "principal_type", tokenData.PrincipalType)
+	setMetadataString(auth.Metadata, "team_id", tokenData.TeamID)
+	setMetadataString(auth.Metadata, "profile_image_asset_id", tokenData.ProfileImageAssetID)
+	if tokenData.CodingDataRetentionOptOut != nil {
+		auth.Metadata["coding_data_retention_opt_out"] = *tokenData.CodingDataRetentionOptOut
+	}
+	if h != nil && h.authManager != nil {
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		if _, errUpdate := h.authManager.Update(ctx, auth); errUpdate != nil {
+			return "", fmt.Errorf("persist refreshed xai token: %w", errUpdate)
+		}
+	}
+	return strings.TrimSpace(tokenData.AccessToken), nil
+}
+
+func xaiTokenNeedsRefresh(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return true
+	}
+	expiresAt, ok := auth.ExpirationTime()
+	return !ok || !expiresAt.After(time.Now().Add(xaiauth.RefreshLead()))
+}
+
+func setMetadataString(metadata map[string]any, key, value string) {
+	if metadata == nil || strings.TrimSpace(value) == "" {
+		return
+	}
+	metadata[key] = strings.TrimSpace(value)
 }
 
 func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {

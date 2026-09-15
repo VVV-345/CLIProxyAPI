@@ -22,7 +22,18 @@ type ClaudeTokenData struct {
 	// OrganizationUUID identifies the Anthropic organization returned by OAuth.
 	OrganizationUUID string `json:"organization_uuid"`
 	// OrganizationName is the display name returned by OAuth.
-	OrganizationName string `json:"organization_name"`
+	OrganizationName      string `json:"organization_name"`
+	DisplayName           string `json:"display_name"`
+	AvatarURL             string `json:"avatar_url"`
+	AccountCreatedAt      string `json:"account_created_at"`
+	OrganizationType      string `json:"organization_type"`
+	BillingType           string `json:"billing_type"`
+	RateLimitTier         string `json:"rate_limit_tier"`
+	SubscriptionCreatedAt string `json:"subscription_created_at"`
+	SubscriptionStatus    string `json:"subscription_status"`
+	HasExtraUsageEnabled  *bool  `json:"has_extra_usage_enabled"`
+	HasClaudeMax          *bool  `json:"has_claude_max"`
+	HasClaudePro          *bool  `json:"has_claude_pro"`
 	// Expire is the timestamp of the token expiry.
 	Expire string `json:"expired"`
 }

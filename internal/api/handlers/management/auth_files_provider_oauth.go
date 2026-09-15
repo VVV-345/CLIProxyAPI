@@ -162,6 +162,39 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if tokenStorage.OrganizationName != "" {
 			metadata["organization_name"] = tokenStorage.OrganizationName
 		}
+		if tokenStorage.DisplayName != "" {
+			metadata["display_name"] = tokenStorage.DisplayName
+		}
+		if tokenStorage.AvatarURL != "" {
+			metadata["avatar_url"] = tokenStorage.AvatarURL
+		}
+		if tokenStorage.AccountCreatedAt != "" {
+			metadata["account_created_at"] = tokenStorage.AccountCreatedAt
+		}
+		if tokenStorage.OrganizationType != "" {
+			metadata["organization_type"] = tokenStorage.OrganizationType
+		}
+		if tokenStorage.BillingType != "" {
+			metadata["billing_type"] = tokenStorage.BillingType
+		}
+		if tokenStorage.RateLimitTier != "" {
+			metadata["rate_limit_tier"] = tokenStorage.RateLimitTier
+		}
+		if tokenStorage.SubscriptionCreatedAt != "" {
+			metadata["subscription_created_at"] = tokenStorage.SubscriptionCreatedAt
+		}
+		if tokenStorage.SubscriptionStatus != "" {
+			metadata["subscription_status"] = tokenStorage.SubscriptionStatus
+		}
+		if tokenStorage.HasExtraUsageEnabled != nil {
+			metadata["has_extra_usage_enabled"] = *tokenStorage.HasExtraUsageEnabled
+		}
+		if tokenStorage.HasClaudeMax != nil {
+			metadata["has_claude_max"] = *tokenStorage.HasClaudeMax
+		}
+		if tokenStorage.HasClaudePro != nil {
+			metadata["has_claude_pro"] = *tokenStorage.HasClaudePro
+		}
 		if len(tokenStorage.DeviceIDs) > 0 {
 			metadata[claude.ClaudeDeviceIDsMetadataKey] = append([]string(nil), tokenStorage.DeviceIDs...)
 		}
@@ -563,17 +596,22 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		}
 
 		metadata := map[string]any{
-			"type":           "xai",
-			"access_token":   tokenStorage.AccessToken,
-			"refresh_token":  tokenStorage.RefreshToken,
-			"id_token":       tokenStorage.IDToken,
-			"token_type":     tokenStorage.TokenType,
-			"expires_in":     tokenStorage.ExpiresIn,
-			"expired":        tokenStorage.Expire,
-			"last_refresh":   tokenStorage.LastRefresh,
-			"base_url":       tokenStorage.BaseURL,
-			"token_endpoint": tokenStorage.TokenEndpoint,
-			"auth_kind":      "oauth",
+			"type":              "xai",
+			"access_token":      tokenStorage.AccessToken,
+			"refresh_token":     tokenStorage.RefreshToken,
+			"id_token":          tokenStorage.IDToken,
+			"token_type":        tokenStorage.TokenType,
+			"expires_in":        tokenStorage.ExpiresIn,
+			"expired":           tokenStorage.Expire,
+			"last_refresh":      tokenStorage.LastRefresh,
+			"base_url":          tokenStorage.BaseURL,
+			"token_endpoint":    tokenStorage.TokenEndpoint,
+			"userinfo_endpoint": tokenStorage.UserInfoEndpoint,
+			"auth_kind":         "oauth",
+			"auth_mode":         "oidc",
+			"oidc_issuer":       xaiauth.Issuer,
+			"oidc_client_id":    xaiauth.ClientID,
+			"key":               tokenStorage.AccessToken,
 		}
 		if tokenStorage.Email != "" {
 			metadata["email"] = tokenStorage.Email
@@ -581,6 +619,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		if tokenStorage.Subject != "" {
 			metadata["sub"] = tokenStorage.Subject
 		}
+		addXAIIdentityMetadata(metadata, tokenStorage)
 
 		record := &coreauth.Auth{
 			ID:       fileName,
@@ -619,6 +658,29 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		response["expires_in"] = int(xaiauth.MaxPollDuration / time.Second)
 	}
 	c.JSON(200, response)
+}
+
+func addXAIIdentityMetadata(metadata map[string]any, tokenStorage *xaiauth.TokenStorage) {
+	if metadata == nil || tokenStorage == nil {
+		return
+	}
+	values := map[string]string{
+		"first_name":             tokenStorage.FirstName,
+		"last_name":              tokenStorage.LastName,
+		"user_id":                tokenStorage.UserID,
+		"principal_id":           tokenStorage.PrincipalID,
+		"principal_type":         tokenStorage.PrincipalType,
+		"team_id":                tokenStorage.TeamID,
+		"profile_image_asset_id": tokenStorage.ProfileImageAssetID,
+	}
+	for key, value := range values {
+		if strings.TrimSpace(value) != "" {
+			metadata[key] = strings.TrimSpace(value)
+		}
+	}
+	if tokenStorage.CodingDataRetentionOptOut != nil {
+		metadata["coding_data_retention_opt_out"] = *tokenStorage.CodingDataRetentionOptOut
+	}
 }
 
 func (h *Handler) RequestKimiToken(c *gin.Context) {

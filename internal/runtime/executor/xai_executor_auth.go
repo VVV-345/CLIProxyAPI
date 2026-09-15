@@ -48,6 +48,10 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	if err != nil {
 		return nil, err
 	}
+	userInfoEndpoint := xaiMetadataString(auth.Metadata, "userinfo_endpoint")
+	if errIdentity := svc.HydrateIdentity(ctx, td, userInfoEndpoint); errIdentity != nil {
+		log.WithError(errIdentity).Debug("xai executor: userinfo refresh failed")
+	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -75,6 +79,20 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	if td.Subject != "" {
 		auth.Metadata["sub"] = td.Subject
 	}
+	auth.Metadata["key"] = td.AccessToken
+	auth.Metadata["auth_mode"] = "oidc"
+	auth.Metadata["oidc_issuer"] = xaiauth.Issuer
+	auth.Metadata["oidc_client_id"] = xaiauth.ClientID
+	xaiSetMetadataString(auth.Metadata, "first_name", td.FirstName)
+	xaiSetMetadataString(auth.Metadata, "last_name", td.LastName)
+	xaiSetMetadataString(auth.Metadata, "user_id", td.UserID)
+	xaiSetMetadataString(auth.Metadata, "principal_id", td.PrincipalID)
+	xaiSetMetadataString(auth.Metadata, "principal_type", td.PrincipalType)
+	xaiSetMetadataString(auth.Metadata, "team_id", td.TeamID)
+	xaiSetMetadataString(auth.Metadata, "profile_image_asset_id", td.ProfileImageAssetID)
+	if td.CodingDataRetentionOptOut != nil {
+		auth.Metadata["coding_data_retention_opt_out"] = *td.CodingDataRetentionOptOut
+	}
 	if tokenEndpoint != "" {
 		auth.Metadata["token_endpoint"] = tokenEndpoint
 	}
@@ -90,4 +108,11 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 		auth.Attributes["base_url"] = xaiauth.DefaultAPIBaseURL
 	}
 	return auth, nil
+}
+
+func xaiSetMetadataString(metadata map[string]any, key, value string) {
+	if metadata == nil || strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+		return
+	}
+	metadata[key] = strings.TrimSpace(value)
 }

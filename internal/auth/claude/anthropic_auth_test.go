@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,33 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestNewAnthropicHttpClientDoesNotSetRequestTimeout(t *testing.T) {
 	if got := NewAnthropicHttpClient(nil).Timeout; got != 0 {
 		t.Fatalf("HTTP client timeout = %s, want zero", got)
+	}
+}
+
+func TestGenerateAuthURLUsesCompatibleEndpointScopeAndLocalCallback(t *testing.T) {
+	authURL, returnedState, errGenerate := (&ClaudeAuth{}).GenerateAuthURL("state-value", &PKCECodes{
+		CodeChallenge: "challenge-value",
+		CodeVerifier:  "verifier-value",
+	})
+	if errGenerate != nil {
+		t.Fatalf("GenerateAuthURL() error = %v", errGenerate)
+	}
+	if returnedState != "state-value" {
+		t.Fatalf("returned state = %q, want state-value", returnedState)
+	}
+	parsed, errParse := url.Parse(authURL)
+	if errParse != nil {
+		t.Fatalf("parse authorization URL: %v", errParse)
+	}
+	if got := parsed.Scheme + "://" + parsed.Host + parsed.Path; got != AuthURL {
+		t.Fatalf("authorization endpoint = %q, want %q", got, AuthURL)
+	}
+	query := parsed.Query()
+	if got := query.Get("scope"); got != ClaudeOAuthScope {
+		t.Fatalf("scope = %q, want %q", got, ClaudeOAuthScope)
+	}
+	if got := query.Get("redirect_uri"); got != RedirectURI {
+		t.Fatalf("redirect_uri = %q, want %q", got, RedirectURI)
 	}
 }
 
@@ -89,8 +117,8 @@ func TestExchangeCodeForTokensPersistsUpstreamAccountAndDevicePool(t *testing.T)
 					}`), nil
 				case ProfileURL:
 					return jsonResponse(req, `{
-						"account":{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","email":"user@example.com"},
-						"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Example Org"}
+						"account":{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","email":"user@example.com","display_name":"User Name","avatar_url":"https://example.com/avatar.png","created_at":"2025-01-01T00:00:00Z","has_claude_max":true,"has_claude_pro":false},
+						"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Example Org","organization_type":"claude_max","billing_type":"stripe","rate_limit_tier":"max_20x","subscription_created_at":"2025-02-01T00:00:00Z","subscription_status":"active","has_extra_usage_enabled":true}
 					}`), nil
 				case RolesURL:
 					return jsonResponse(req, `{"roles":[]}`), nil
@@ -112,10 +140,22 @@ func TestExchangeCodeForTokensPersistsUpstreamAccountAndDevicePool(t *testing.T)
 	if bundle.TokenData.OrganizationUUID != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" || bundle.TokenData.OrganizationName != "Example Org" {
 		t.Fatalf("organization = %q/%q, want OAuth response organization", bundle.TokenData.OrganizationUUID, bundle.TokenData.OrganizationName)
 	}
+	if bundle.TokenData.OrganizationType != "claude_max" || bundle.TokenData.RateLimitTier != "max_20x" {
+		t.Fatalf("organization profile = %q/%q, want claude_max/max_20x", bundle.TokenData.OrganizationType, bundle.TokenData.RateLimitTier)
+	}
+	if bundle.TokenData.HasExtraUsageEnabled == nil || !*bundle.TokenData.HasExtraUsageEnabled {
+		t.Fatalf("extra usage = %v, want true", bundle.TokenData.HasExtraUsageEnabled)
+	}
+	if bundle.TokenData.HasClaudeMax == nil || !*bundle.TokenData.HasClaudeMax {
+		t.Fatalf("has Claude Max = %v, want true", bundle.TokenData.HasClaudeMax)
+	}
 	if len(bundle.DeviceIDs) != ClaudeDevicePoolSize {
 		t.Fatalf("device pool length = %d, want %d", len(bundle.DeviceIDs), ClaudeDevicePoolSize)
 	}
 	storage := auth.CreateTokenStorage(bundle)
+	if storage.DisplayName != "User Name" || storage.SubscriptionStatus != "active" {
+		t.Fatalf("stored profile = %q/%q, want User Name/active", storage.DisplayName, storage.SubscriptionStatus)
+	}
 	if storage.AccountUUID != bundle.TokenData.AccountUUID || storage.OrganizationUUID != bundle.TokenData.OrganizationUUID {
 		t.Fatalf("storage account identity = %#v, want bundle identity", storage)
 	}

@@ -88,6 +88,12 @@ func TestXAIExecutorRequestPreparationRefreshDecision(t *testing.T) {
 
 func TestXAIExecutorPrepareRequestAuthRefreshesExpiringToken(t *testing.T) {
 	var tokenCalls int
+	accessToken := fakeXAIExecutorJWT(map[string]any{
+		"sub":            "principal-1",
+		"user_id":        "user-1",
+		"first_name":     "Ada",
+		"principal_type": "User",
+	})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenCalls++
 		if errParse := r.ParseForm(); errParse != nil {
@@ -97,7 +103,11 @@ func TestXAIExecutorPrepareRequestAuthRefreshesExpiringToken(t *testing.T) {
 			t.Fatalf("refresh_token = %q, want old-refresh", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  accessToken,
+			"refresh_token": "new-refresh",
+			"expires_in":    3600,
+		})
 	}))
 	defer server.Close()
 
@@ -119,8 +129,8 @@ func TestXAIExecutorPrepareRequestAuthRefreshesExpiringToken(t *testing.T) {
 	if tokenCalls != 1 {
 		t.Fatalf("token endpoint calls = %d, want 1", tokenCalls)
 	}
-	if got := xaiMetadataString(updated.Metadata, "access_token"); got != "new-access" {
-		t.Fatalf("access_token = %q, want new-access", got)
+	if got := xaiMetadataString(updated.Metadata, "access_token"); got != accessToken {
+		t.Fatalf("access_token = %q, want refreshed JWT", got)
 	}
 	if got := xaiMetadataString(updated.Metadata, "refresh_token"); got != "new-refresh" {
 		t.Fatalf("refresh_token = %q, want new-refresh", got)
@@ -128,6 +138,18 @@ func TestXAIExecutorPrepareRequestAuthRefreshesExpiringToken(t *testing.T) {
 	if executor.ShouldPrepareRequestAuth(updated) {
 		t.Fatal("ShouldPrepareRequestAuth() = true after successful refresh")
 	}
+	if got := xaiMetadataString(updated.Metadata, "user_id"); got != "user-1" {
+		t.Fatalf("user_id = %q, want user-1", got)
+	}
+	if got := xaiMetadataString(updated.Metadata, "first_name"); got != "Ada" {
+		t.Fatalf("first_name = %q, want Ada", got)
+	}
+}
+
+func fakeXAIExecutorJWT(claims map[string]any) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload, _ := json.Marshal(claims)
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
 
 func TestCountXAIInputTokensExcludesRequestStructure(t *testing.T) {

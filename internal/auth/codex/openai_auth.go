@@ -26,6 +26,7 @@ const (
 	TokenURL            = "https://auth.openai.com/oauth/token"
 	ClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
 	RedirectURI         = "http://localhost:1455/auth/callback"
+	CodexOAuthScope     = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 	codexRefreshTimeout = 30 * time.Second
 )
 
@@ -73,13 +74,14 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 		"client_id":                  {ClientID},
 		"response_type":              {"code"},
 		"redirect_uri":               {RedirectURI},
-		"scope":                      {"openid email profile offline_access"},
+		"scope":                      {CodexOAuthScope},
 		"state":                      {state},
 		"code_challenge":             {pkceCodes.CodeChallenge},
 		"code_challenge_method":      {"S256"},
 		"prompt":                     {"login"},
 		"id_token_add_organizations": {"true"},
 		"codex_cli_simplified_flow":  {"true"},
+		"codex_streamlined_login":    {"true"},
 	}
 
 	authURL := fmt.Sprintf("%s?%s", AuthURL, params.Encode())

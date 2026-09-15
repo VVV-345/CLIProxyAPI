@@ -3,6 +3,8 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,8 +13,41 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+type managementRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f managementRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type managementRefreshExecutor struct{}
+
+func (*managementRefreshExecutor) Identifier() string { return "test-refresh" }
+
+func (*managementRefreshExecutor) Execute(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (*managementRefreshExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (*managementRefreshExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	auth.Metadata["access_token"] = "new-token"
+	auth.Metadata["key"] = "new-token"
+	return auth, nil
+}
+
+func (*managementRefreshExecutor) CountTokens(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (*managementRefreshExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
 
 func TestAPICallUsesRequestProxyURL(t *testing.T) {
 	t.Parallel()
@@ -50,6 +85,103 @@ func TestAPICallUsesRequestProxyURL(t *testing.T) {
 	}
 	if response.Body != "proxied" {
 		t.Fatalf("upstream body = %q, want %q", response.Body, "proxied")
+	}
+}
+
+func TestExecuteAPICallRetriesGETTransportFailures(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	httpClient := &http.Client{Transport: managementRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts < apiCallGETMaxAttempts {
+			return nil, errors.New("temporary transport failure")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ok")),
+			Request:    req,
+		}, nil
+	})}
+
+	h := &Handler{}
+	result, errCall := h.executeAPICall(
+		context.Background(),
+		httpClient,
+		nil,
+		http.MethodGet,
+		"https://quota.example.test/usage",
+		"",
+		nil,
+		"",
+	)
+	if errCall != nil {
+		t.Fatalf("executeAPICall() error = %v", errCall)
+	}
+	if attempts != apiCallGETMaxAttempts {
+		t.Fatalf("attempts = %d, want %d", attempts, apiCallGETMaxAttempts)
+	}
+	if result.StatusCode != http.StatusOK || result.Body != "ok" {
+		t.Fatalf("result = %#v, want successful final response", result)
+	}
+}
+
+func TestExecuteAPICallRefreshesAfterUnauthorizedAndRetriesOnce(t *testing.T) {
+	t.Parallel()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&managementRefreshExecutor{})
+	auth := &coreauth.Auth{
+		ID:       "test-refresh-auth",
+		Provider: "test-refresh",
+		Metadata: map[string]any{
+			"access_token":  "old-token",
+			"refresh_token": "refresh-token",
+			"key":           "old-token",
+		},
+	}
+	registered, errRegister := manager.Register(context.Background(), auth)
+	if errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	attempts := 0
+	httpClient := &http.Client{Transport: managementRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		status := http.StatusUnauthorized
+		body := "unauthorized"
+		if req.Header.Get("Authorization") == "Bearer new-token" {
+			status = http.StatusOK
+			body = "ok"
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})}
+
+	h := &Handler{authManager: manager}
+	result, errCall := h.executeAPICall(
+		context.Background(),
+		httpClient,
+		registered,
+		http.MethodGet,
+		"https://quota.example.test/usage",
+		"",
+		map[string]string{"Authorization": "Bearer $TOKEN$"},
+		"",
+	)
+	if errCall != nil {
+		t.Fatalf("executeAPICall() error = %v", errCall)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if result.StatusCode != http.StatusOK || result.Body != "ok" {
+		t.Fatalf("result = %#v, want successful refreshed response", result)
 	}
 }
 
