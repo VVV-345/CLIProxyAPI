@@ -345,6 +345,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
 	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
+	entry["model_states"] = modelAvailabilityPayload(auth.ModelStates)
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
 	}
@@ -435,6 +436,32 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 		entry["request_retry"] = requestRetry
 	}
 	return entry
+}
+
+func modelAvailabilityPayload(states map[string]*coreauth.ModelState) map[string]any {
+	result := make(map[string]any, len(states))
+	for model, state := range states {
+		if state == nil {
+			continue
+		}
+		retryAt := state.NextRetryAfter
+		if state.Quota.NextRecoverAt.After(retryAt) {
+			retryAt = state.Quota.NextRecoverAt
+		}
+		reason := "upstream_error"
+		if state.Quota.Exceeded {
+			reason = "rate_limit"
+		}
+		entry := map[string]any{
+			"unavailable": state.Unavailable || state.Quota.Exceeded,
+			"reason":      reason,
+		}
+		if !retryAt.IsZero() {
+			entry["next_retry_after"] = retryAt
+		}
+		result[model] = entry
+	}
+	return result
 }
 
 func authFileRequestRetryFromJSON(data []byte) (int, bool) {

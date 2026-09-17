@@ -7,6 +7,35 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func TestModelAvailabilityPayloadSeparatesModelsAndExcludesErrorDetails(t *testing.T) {
+	now := time.Now()
+	states := map[string]*coreauth.ModelState{
+		"failed":  {Unavailable: true, NextRetryAfter: now.Add(time.Second)},
+		"healthy": {},
+		"limited": {Quota: coreauth.QuotaState{Exceeded: true, NextRecoverAt: now.Add(time.Minute)}},
+		"nil":     nil,
+	}
+	got := modelAvailabilityPayload(states)
+	if len(got) != 3 {
+		t.Fatalf("unexpected states: %#v", got)
+	}
+	failed := got["failed"].(map[string]any)
+	if failed["unavailable"] != true || failed["next_retry_after"] != now.Add(time.Second) || failed["reason"] != "upstream_error" {
+		t.Fatalf("missing transient cooldown: %#v", failed)
+	}
+	if len(failed) != 3 {
+		t.Fatalf("unexpected error details: %#v", failed)
+	}
+	healthy := got["healthy"].(map[string]any)
+	if healthy["unavailable"] != false || healthy["next_retry_after"] != nil {
+		t.Fatalf("healthy model was blocked: %#v", healthy)
+	}
+	limited := got["limited"].(map[string]any)
+	if limited["reason"] != "rate_limit" || limited["next_retry_after"] != now.Add(time.Minute) {
+		t.Fatalf("missing quota cooldown: %#v", limited)
+	}
+}
+
 func TestModelQuotaObservationPayloadOmitsUnsupportedProviders(t *testing.T) {
 	states := map[string]*coreauth.ModelState{
 		"grok-4": {
