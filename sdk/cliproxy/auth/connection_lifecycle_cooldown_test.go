@@ -34,6 +34,8 @@ func TestManager_MarkResult_ConnectionLifecycleDoesNotCooldown(t *testing.T) {
 		{name: "unexpected EOF", err: &Error{Message: "unexpected EOF"}},
 		{name: "plain EOF", err: &Error{Message: "EOF"}},
 		{name: "wrapped unexpected EOF", err: &Error{Message: "read tcp 127.0.0.1:1->127.0.0.1:2: unexpected EOF"}},
+		{name: "http2 force closed", err: &Error{Message: "http2: client connection force closed via ClientConn.Close"}},
+		{name: "http2 conn closed", err: &Error{Message: "http2: client conn is closed"}},
 		{name: "typed canceled", err: resultErrorFromError(context.Canceled)},
 		{name: "typed deadline", err: resultErrorFromError(context.DeadlineExceeded)},
 		{name: "url canceled", err: resultErrorFromError(&url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled})},
@@ -116,6 +118,10 @@ func TestManager_MarkResult_HTTPStatusWithLifecycleTextStillCooldowns(t *testing
 		{name: "429 context canceled", httpStatus: http.StatusTooManyRequests, message: "context canceled", wantAuth: true},
 		{name: "500 unexpected EOF", httpStatus: http.StatusInternalServerError, message: "unexpected EOF"},
 		{name: "500 websocket 1006 text", httpStatus: http.StatusInternalServerError, message: "websocket: close 1006 (abnormal closure): unexpected EOF"},
+		{name: "401 http2 force closed", httpStatus: http.StatusUnauthorized, message: "http2: client connection force closed via ClientConn.Close", wantAuth: true},
+		{name: "429 http2 conn closed", httpStatus: http.StatusTooManyRequests, message: "http2: client conn is closed", wantAuth: true},
+		{name: "500 http2 force closed", httpStatus: http.StatusInternalServerError, message: "http2: client connection force closed via ClientConn.Close"},
+		{name: "500 http2 conn closed", httpStatus: http.StatusInternalServerError, message: "http2: client conn is closed"},
 	}
 
 	for _, tc := range cases {
@@ -222,6 +228,9 @@ func TestResultErrorFromError_ConnectionLifecycleDoesNotBecomeRequestScoped(t *t
 		errors.New("websocket: close 1006 (abnormal closure): unexpected EOF"),
 		errors.New("context deadline exceeded"),
 		errors.New("unexpected EOF"),
+		errors.New("http2: client connection force closed via ClientConn.Close"),
+		errors.New("http2: client conn is closed"),
+		&url.Error{Op: "Post", URL: "https://example.com", Err: errors.New("http2: client conn is closed")},
 	}
 	for _, err := range cases {
 		if !isConnectionLifecycleError(err) {
@@ -252,6 +261,10 @@ func TestIsConnectionLifecycleError_StatusBearingErrorsStayCoolable(t *testing.T
 		&statusBearingError{status: http.StatusTooManyRequests, msg: "context canceled"},
 		&statusBearingError{status: http.StatusInternalServerError, msg: "unexpected EOF"},
 		&statusBearingError{status: http.StatusBadGateway, msg: "websocket: close 1006 (abnormal closure): unexpected EOF"},
+		&statusBearingError{status: http.StatusUnauthorized, msg: "http2: client connection force closed via ClientConn.Close"},
+		&statusBearingError{status: http.StatusTooManyRequests, msg: "http2: client conn is closed"},
+		&statusBearingError{status: http.StatusInternalServerError, msg: "http2: client connection force closed via ClientConn.Close"},
+		&statusBearingError{status: http.StatusInternalServerError, msg: "http2: client conn is closed"},
 	}
 	for _, err := range cases {
 		if isConnectionLifecycleError(err) {

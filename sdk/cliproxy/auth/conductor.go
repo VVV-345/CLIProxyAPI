@@ -66,6 +66,12 @@ type Result struct {
 	// observed watermark. Count-tokens requests reuse the credential but are not
 	// generation traffic; their response headers are not a generation snapshot.
 	SkipQuotaObservation bool
+	// ExecutionSeq is the manager-local monotonic sequence assigned when the
+	// execution was dispatched upstream. It orders in-flight executions so a
+	// success dispatched before a cooldown was recorded cannot clear that
+	// cooldown. Zero means unknown (direct MarkResult callers) and is exempt
+	// from the ordering guard.
+	ExecutionSeq uint64
 }
 
 // Selector chooses an auth candidate for execution.
@@ -138,6 +144,10 @@ type Manager struct {
 	providerOffsets             map[string]int
 	homeDispatchBundle          atomic.Pointer[HomeDispatchBundle]
 	homeInFlightPublisherConfig atomic.Pointer[HomeInFlightPublisherConfig]
+
+	// executionSeq stamps upstream dispatches so a success dispatched before a
+	// cooldown was recorded cannot clear that cooldown.
+	executionSeq atomic.Uint64
 
 	// Retry controls request retry behavior.
 	requestRetry        atomic.Int32

@@ -223,6 +223,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				return selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
 			}
+			executionSeq := m.nextExecutionSeq()
 			startHomeExec := time.Now()
 			response, errExecute = execute()
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
@@ -238,7 +239,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
 			}
-			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, Options: execOpts}
+			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, Options: execOpts, ExecutionSeq: executionSeq}
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
